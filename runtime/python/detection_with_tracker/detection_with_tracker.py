@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example module for Hailo Detection + ByteTrack + Supervision."""
+"""Example module for Hailo Detection + ByteTrack + Supervision (with H.264 output)."""
 
 import argparse
 import supervision as sv
@@ -9,7 +9,7 @@ import cv2
 import queue
 import sys
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import threading
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -22,7 +22,7 @@ def initialize_arg_parser() -> argparse.ArgumentParser:
         description="Detection Example - Tracker with ByteTrack and Supervision"
     )
     parser.add_argument(
-        "-n", "--net", help="Path for the HEF model.", default="yolov5m_wo_spp_60p.hef"
+        "-n", "--net", help="Path for the HEF model.", default="yolov5m_wo_spp.hef"
     )
     parser.add_argument(
         "-i", "--input_video", default="input_video.mp4", help="Path to the input video."
@@ -79,10 +79,11 @@ def extract_detections(
             class_id.append(i)
             num_detections += 1
 
+    # 保证维度正确
     return {
-        "xyxy": np.array(xyxy),
-        "confidence": np.array(confidence),
-        "class_id": np.array(class_id),
+        "xyxy": np.array(xyxy, dtype=np.float32).reshape(-1, 4),
+        "confidence": np.array(confidence, dtype=np.float32).reshape(-1),
+        "class_id": np.array(class_id, dtype=np.int32).reshape(-1),
         "num_detections": num_detections,
     }
 
@@ -95,27 +96,26 @@ def postprocess_detections(
     box_annotator: sv.RoundBoxAnnotator,
     label_annotator: sv.LabelAnnotator,
 ) -> np.ndarray:
-    """Postprocess the detections by annotating the frame with bounding boxes and labels."""
+    """Annotate frame with bounding boxes and labels."""
+    if detections["num_detections"] == 0:
+        return frame
+
     sv_detections = sv.Detections(
         xyxy=detections["xyxy"],
         confidence=detections["confidence"],
         class_id=detections["class_id"],
     )
 
-    # Update detections with tracking information
     sv_detections = tracker.update_with_detections(sv_detections)
 
-    # Generate tracked labels for annotated objects
     labels: List[str] = [
         f"#{tracker_id} {class_names[class_id]}"
         for class_id, tracker_id in zip(sv_detections.class_id, sv_detections.tracker_id)
     ]
 
-    # Annotate objects with bounding boxes
     annotated_frame: np.ndarray = box_annotator.annotate(
         scene=frame.copy(), detections=sv_detections
     )
-    # Annotate objects with labels
     annotated_labeled_frame: np.ndarray = label_annotator.annotate(
         scene=annotated_frame, detections=sv_detections, labels=labels
     )
@@ -123,8 +123,6 @@ def postprocess_detections(
 
 
 def main() -> None:
-    """Main function to run the video processing."""
-    # Parse command-line arguments
     args = initialize_arg_parser().parse_args()
 
     input_queue: queue.Queue = queue.Queue()
@@ -137,61 +135,48 @@ def main() -> None:
     )
     model_h, model_w, _ = hailo_inference.get_input_shape()
 
-    # Initialize components for video processing
     frame_generator = sv.get_video_frames_generator(source_path=args.input_video)
     video_info = sv.VideoInfo.from_video_path(video_path=args.input_video)
     video_w, video_h = video_info.resolution_wh
     box_annotator = sv.RoundBoxAnnotator()
     label_annotator = sv.LabelAnnotator()
     tracker = sv.ByteTrack()
-    start, end = sv.Point(x=0, y=1080), sv.Point(x=3840, y=1080)
-    line_zone = sv.LineZone(start=start, end=end)
 
-    # Load class names from the labels file
     with open(args.labels, "r", encoding="utf-8") as f:
         class_names: List[str] = f.read().splitlines()
 
-    # Start the asynchronous inference in a separate thread
     inference_thread: threading.Thread = threading.Thread(target=hailo_inference.run)
     inference_thread.start()
 
-    # Initialize video sink for output
-    with sv.VideoSink(target_path=args.output_video, video_info=video_info) as sink:
-        # Process each frame in the video
-        for frame in tqdm(frame_generator, total=video_info.total_frames):
-            # Preprocess the frame
-            preprocessed_frame: np.ndarray = preprocess_frame(
-                frame, model_h, model_w, video_h, video_w
-            )
+    # 使用 OpenCV VideoWriter (H.264 压缩)
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264
+    out = cv2.VideoWriter(args.output_video, fourcc, video_info.fps, (video_w, video_h))
 
-            # Put the frame into the input queue for inference
-            input_queue.put([preprocessed_frame])
+    for frame in tqdm(frame_generator, total=video_info.total_frames):
+        preprocessed_frame: np.ndarray = preprocess_frame(
+            frame, model_h, model_w, video_h, video_w
+        )
+        input_queue.put([preprocessed_frame])
 
-            # Get the inference result from the output queue
-            results: List[np.ndarray]
-            _, results = output_queue.get()
+        _, results = output_queue.get()
+        if len(results) == 1:
+            results = results[0]
 
-            # Deals with the expanded results from hailort versions < 4.19.0
-            if len(results) == 1:
-                results = results[0]
+        detections: Dict[str, np.ndarray] = extract_detections(
+            results, video_h, video_w, args.score_thresh
+        )
 
-            # Extract detections from the inference results
-            detections: Dict[str, np.ndarray] = extract_detections(
-                results, video_h, video_w, args.score_thresh
-            )
+        annotated_labeled_frame: np.ndarray = postprocess_detections(
+            frame, detections, class_names, tracker, box_annotator, label_annotator
+        )
 
-            # Postprocess the detections and annotate the frame
-            annotated_labeled_frame: np.ndarray = postprocess_detections(
-                frame, detections, class_names, tracker, box_annotator, label_annotator
-            )
+        out.write(annotated_labeled_frame)
 
-            # Write annotated frame to output video
-            sink.write_frame(frame=annotated_labeled_frame)
-
-    # Signal the inference thread to stop and wait for it to finish
+    out.release()
     input_queue.put(None)
     inference_thread.join()
 
 
 if __name__ == "__main__":
     main()
+

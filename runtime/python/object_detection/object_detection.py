@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-n", "--net", 
         help="Path for the network in HEF format.",
-        default="yolov7.hef"
+        default="yolov11s.hef"
     )
     parser.add_argument(
         "-i", "--input", 

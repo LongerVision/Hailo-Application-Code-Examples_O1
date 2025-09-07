@@ -9,7 +9,7 @@ It processes input images, videos, or a camera stream and annotates it with the 
 Requirements
 ------------
 
-- hailo_platform==4.20.0
+- hailo_platform==4.22.0
 - opencv
 - numpy
 - loguru
@@ -75,19 +75,19 @@ Example
 -------
 **Inference on a camera stream**
 ```shell script
-./object_detection.py -n ./yolov7.hef -i camera
+./object_detection.py -n ./yolov11s.hef -i camera
 ```
 **Inference on a video**
 ```shell script
-./object_detection.py -n ./yolov7.hef -i input_video.mp4
+./object_detection.py -n ./yolov11s.hef -i input_video.mp4
 ```
 **Inference on an image**
 ```shell script
-./object_detection.py -n ./yolov7.hef -i zidane.jpg
+./object_detection.py -n ./yolov11s.hef -i zidane.jpg
 ```
 **Inference on a folder of images**
 ```shell script
-./object_detection.py -n ./yolov7.hef -i input_folder
+./object_detection.py -n ./yolov11s.hef -i input_folder
 ```
 
 Additional Notes
